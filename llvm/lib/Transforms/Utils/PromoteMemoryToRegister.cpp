@@ -458,7 +458,8 @@ private:
 
   void ComputeLiveInBlocks(AllocaInst *AI, AllocaInfo &Info,
                            const SmallPtrSetImpl<BasicBlock *> &DefBlocks,
-                           SmallPtrSetImpl<BasicBlock *> &LiveInBlocks);
+                           SmallPtrSetImpl<BasicBlock *> &LiveInBlocks,
+                           BasicBlock *LifetimeStartBB);
   void RenamePass(BasicBlock *BB, BasicBlock *Pred);
   bool QueuePhiNode(BasicBlock *BB, unsigned AllocaIdx, unsigned &Version);
 
@@ -551,6 +552,23 @@ static void removeIntrinsicUsers(AllocaInst *AI) {
     }
     I->eraseFromParent();
   }
+}
+
+static BasicBlock *findLifetimeStartBB(AllocaInst *AI) {
+  BasicBlock *LifetimeStartBB = nullptr;
+  for (Use &U : AI->uses()) {
+    auto *II = dyn_cast<LifetimeIntrinsic>(U.getUser());
+    if (!II || II->getIntrinsicID() != Intrinsic::lifetime_start)
+      continue;
+
+    // Multiple lifetime.start intrinsics may describe disjoint lifetimes,
+    // which cannot be represented by a single definition boundary.
+    if (LifetimeStartBB)
+      return nullptr;
+    LifetimeStartBB = II->getParent();
+  }
+
+  return LifetimeStartBB;
 }
 
 /// Rewrite as many loads as possible given a single store.
@@ -788,6 +806,7 @@ void PromoteMem2Reg::run() {
     assert(AI->getParent()->getParent() == &F &&
            "All allocas should be in the same function, which is same as DF!");
 
+    BasicBlock *LifetimeStartBB = findLifetimeStartBB(AI);
     removeIntrinsicUsers(AI);
 
     if (AI->use_empty()) {
@@ -847,7 +866,12 @@ void PromoteMem2Reg::run() {
     // Determine which blocks the value is live in.  These are blocks which lead
     // to uses.
     SmallPtrSet<BasicBlock *, 32> LiveInBlocks;
-    ComputeLiveInBlocks(AI, Info, DefBlocks, LiveInBlocks);
+    ComputeLiveInBlocks(AI, Info, DefBlocks, LiveInBlocks, LifetimeStartBB);
+
+    // Treat lifetime.start as a definition boundary so IDF does not create
+    // loop-carried dependencies across distinct dynamic lifetimes.
+    if (LifetimeStartBB)
+      DefBlocks.insert(LifetimeStartBB);
 
     // At this point, we're committed to promoting the alloca using IDF's, and
     // the standard SSA construction algorithm.  Determine which blocks need phi
@@ -1010,7 +1034,7 @@ void PromoteMem2Reg::run() {
 void PromoteMem2Reg::ComputeLiveInBlocks(
     AllocaInst *AI, AllocaInfo &Info,
     const SmallPtrSetImpl<BasicBlock *> &DefBlocks,
-    SmallPtrSetImpl<BasicBlock *> &LiveInBlocks) {
+    SmallPtrSetImpl<BasicBlock *> &LiveInBlocks, BasicBlock *LifetimeStartBB) {
   // To determine liveness, we must iterate through the predecessors of blocks
   // where the def is live.  Blocks are added to the worklist if we need to
   // check their predecessors.  Start with all the using blocks.
@@ -1024,6 +1048,15 @@ void PromoteMem2Reg::ComputeLiveInBlocks(
     BasicBlock *BB = LiveInBlockWorklist[i];
     if (!DefBlocks.count(BB))
       continue;
+
+    // The value before lifetime.start is not live into the new lifetime.
+    if (BB == LifetimeStartBB) {
+      LiveInBlockWorklist[i] = LiveInBlockWorklist.back();
+      LiveInBlockWorklist.pop_back();
+      --i;
+      --e;
+      continue;
+    }
 
     // Okay, this is a block that both uses and defines the value.  If the first
     // reference to the alloca is a def (store), then we know it isn't live-in.
@@ -1065,6 +1098,10 @@ void PromoteMem2Reg::ComputeLiveInBlocks(
     for (BasicBlock *P : predecessors(BB)) {
       // The value is not live into a predecessor if it defines the value.
       if (DefBlocks.count(P))
+        continue;
+
+      // A value from before lifetime.start cannot reach the new lifetime.
+      if (P == LifetimeStartBB)
         continue;
 
       // Otherwise it is, add to the worklist.
