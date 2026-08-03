@@ -542,15 +542,14 @@ static bool removeRedundantDbgInstrsUsingForwardScan(BasicBlock *BB) {
   return RemovedAny;
 }
 
-/// Remove redundant undef dbg.assign intrinsic from an entry block using a
-/// forward scan.
+/// Remove redundant undef debug values from an entry block using a forward
+/// scan.
 /// Strategy:
 /// ---------------------
-/// Scanning forward, delete dbg.assign intrinsics iff they are undef, not
-/// linked to an intrinsic, and don't share an aggregate variable with a debug
-/// intrinsic that didn't meet the criteria. In other words, undef dbg.assigns
-/// that come before non-undef debug intrinsics for the variable are
-/// deleted. Given:
+/// Scanning forward, delete dbg.value-like records iff they are undef and no
+/// earlier non-undef debug record describes an overlapping variable fragment.
+/// In other words, undef debug values that come before non-undef debug records
+/// for the variable fragment are deleted. Given:
 ///
 ///   dbg.assign undef, "x", FragmentX1 (*)
 ///   <block of instructions, none being "dbg.value ..., "x", ...">
@@ -559,15 +558,25 @@ static bool removeRedundantDbgInstrsUsingForwardScan(BasicBlock *BB) {
 ///   dbg.assign undef, "x", FragmentX1
 ///
 /// then (only) the instruction marked with (*) can be removed.
-/// Possible improvements:
-/// - Keep track of non-overlapping fragments.
-static bool removeUndefDbgAssignsFromEntryBlock(BasicBlock *BB) {
+static bool removeRedundantInitialUndefDebugRecords(BasicBlock *BB) {
   assert(BB->isEntryBlock() && "expected entry block");
   bool RemovedAny = false;
-  DenseSet<DebugVariableAggregate> SeenDefForAggregate;
+  SmallVector<DebugVariable, 4> SeenDefs;
 
-  // Remove undef dbg.assign intrinsics that are encountered before
-  // any non-undef intrinsics from the entry block.
+  auto HasOverlappingDef = [&SeenDefs](const DebugVariable &Variable) {
+    return llvm::any_of(SeenDefs, [&Variable](const DebugVariable &Seen) {
+      if (Seen.getVariable() != Variable.getVariable() ||
+          Seen.getInlinedAt() != Variable.getInlinedAt())
+        return false;
+      if (!Seen.getFragment() || !Variable.getFragment())
+        return true;
+      return DIExpression::fragmentsOverlap(*Seen.getFragment(),
+                                            *Variable.getFragment());
+    });
+  };
+
+  // Remove undef debug values that are encountered before any non-undef
+  // records in the entry block.
   for (auto &I : *BB) {
     for (DbgVariableRecord &DVR :
          make_early_inc_range(filterDbgVars(I.getDbgRecordRange()))) {
@@ -575,13 +584,17 @@ static bool removeUndefDbgAssignsFromEntryBlock(BasicBlock *BB) {
         continue;
       bool IsDbgValueKind =
           (DVR.isDbgValue() || at::getAssignmentInsts(&DVR).empty());
+      bool IsUndefDbgValue = DVR.isDbgValue() &&
+                             DVR.getNumVariableLocationOps() == 1 &&
+                             isa<UndefValue>(DVR.getVariableLocationOp(0)) &&
+                             !isa<PoisonValue>(DVR.getVariableLocationOp(0));
 
-      DebugVariableAggregate Aggregate(&DVR);
-      if (!SeenDefForAggregate.contains(Aggregate)) {
+      DebugVariable Variable(&DVR);
+      if (!HasOverlappingDef(Variable)) {
         bool IsKill = DVR.isKillLocation() && IsDbgValueKind;
         if (!IsKill) {
-          SeenDefForAggregate.insert(Aggregate);
-        } else if (DVR.isDbgAssign()) {
+          SeenDefs.push_back(Variable);
+        } else if (DVR.isDbgAssign() || IsUndefDbgValue) {
           DVR.eraseFromParent();
           RemovedAny = true;
         }
@@ -608,7 +621,7 @@ bool llvm::RemoveRedundantDbgInstrs(BasicBlock *BB) {
   MadeChanges |= removeRedundantDbgInstrsUsingBackwardScan(BB);
   if (BB->isEntryBlock() &&
       isAssignmentTrackingEnabled(*BB->getParent()->getParent()))
-    MadeChanges |= removeUndefDbgAssignsFromEntryBlock(BB);
+    MadeChanges |= removeRedundantInitialUndefDebugRecords(BB);
   MadeChanges |= removeRedundantDbgInstrsUsingForwardScan(BB);
 
   if (MadeChanges)

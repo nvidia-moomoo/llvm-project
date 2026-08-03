@@ -16,13 +16,15 @@
 ;; Check that when the memcpy to fragment(256, 128) is split into two 2xfloat
 ;; stores, the dbg.assign is split into two with fragment(256, 64) &
 ;; fragment(320, 64). Ensure that only the value-expression gets fragment info;
-;; that the address-expression remains untouched.
+;; that the address-expression remains untouched. Since those stores and the
+;; following lifetime.end all collapse onto the return, the lifetime kills
+;; make the earlier fragment locations empty and the entire sequence is
+;; redundant.
 
 ; CHECK: %call = call
 ; CHECK-NEXT: %0 = extractvalue { <2 x float>, <2 x float> } %call, 0
 ; CHECK-NEXT: %1 = extractvalue { <2 x float>, <2 x float> } %call, 1
-; CHECK-NEXT: #dbg_value(<2 x float> undef, ![[var:[0-9]+]], !DIExpression(DW_OP_LLVM_fragment, 256, 64),
-; CHECK-NEXT: #dbg_value(<2 x float> undef, ![[var]], !DIExpression(DW_OP_LLVM_fragment, 320, 64),
+; CHECK-NEXT: ret void
 
 %class.c = type { [4 x float] }
 

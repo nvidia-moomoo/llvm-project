@@ -8,6 +8,16 @@ define dso_local void @_Z1fv() !dbg !7 {
 entry:
   %test = alloca i32, align 4, !DIAssignID !20
 ; CHECK: alloca
+;; Forward scan: Keep poison dbg.values; this cleanup only targets undef.
+; CHECK-NEXT: #dbg_value(i32 poison, ![[Local3:[0-9]+]]
+; CHECK-NEXT: @step()
+  call void @llvm.dbg.value(metadata i32 poison, metadata !22, metadata !DIExpression()), !dbg !14
+  call void @step()
+
+;; Forward scan: An initial undef dbg.value does not close a location range and
+;; should be deleted.
+  call void @llvm.dbg.value(metadata i32 undef, metadata !11, metadata !DIExpression()), !dbg !14
+
 ;; Forward scan: This dbg.assign for Local2 contains an undef value component
 ;; in the entry block and is the first debug intrinsic for the variable, but is
 ;; linked to an instruction so should not be deleted.
@@ -105,7 +115,7 @@ declare void @llvm.dbg.value(metadata, metadata, metadata)
 !7 = distinct !DISubprogram(name: "f", linkageName: "_Z1fv", scope: !1, file: !1, line: 1, type: !8, scopeLine: 1, flags: DIFlagPrototyped | DIFlagAllCallsDescribed, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0, retainedNodes: !10)
 !8 = !DISubroutineType(types: !9)
 !9 = !{null}
-!10 = !{!11, !19}
+!10 = !{!11, !19, !22}
 !11 = !DILocalVariable(name: "Local", scope: !7, file: !1, line: 2, type: !12)
 !12 = !DIBasicType(name: "int", size: 32, encoding: DW_ATE_signed)
 !13 = distinct !DIAssignID()
@@ -117,4 +127,5 @@ declare void @llvm.dbg.value(metadata, metadata, metadata)
 !19 = !DILocalVariable(name: "Local2", scope: !7, file: !1, line: 2, type: !12)
 !20 = distinct !DIAssignID()
 !21 = distinct !DIAssignID()
+!22 = !DILocalVariable(name: "Local3", scope: !7, file: !1, line: 2, type: !12)
 !1000 = !{i32 7, !"debug-info-assignment-tracking", i1 true}

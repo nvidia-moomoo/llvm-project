@@ -31,9 +31,6 @@
 ; CHECK-NEXT:   %S.sroa.5 = alloca { i32, i32, i32 }, align 8, !DIAssignID ![[ID_3:[0-9]+]]
 ; CHECK-NEXT:   #dbg_assign(i1 undef, ![[VAR]], !DIExpression(DW_OP_LLVM_fragment, 128, 96), ![[ID_3]], ptr %S.sroa.5, !DIExpression(),
 
-;; lifetime.start makes the middle (promoted) slice undef.
-; CHECK: #dbg_value(i32 undef, ![[VAR]], !DIExpression(DW_OP_LLVM_fragment, 96, 32),
-
 ;; The memset has been sliced up (middle slice removed).
 ; CHECK: call void @llvm.memset{{.*}}(ptr align 8 %S.sroa.0, i8 0, i64 12, i1 false), !dbg !{{.+}}, !DIAssignID ![[ID_5:[0-9]+]]
 ; CHECK: call void @llvm.memset{{.*}}(ptr align 8 %S.sroa.5, i8 0, i64 12, i1 false), !dbg !{{.+}}, !DIAssignID ![[ID_6:[0-9]+]]
